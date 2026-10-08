@@ -1,60 +1,29 @@
-﻿name: 247 Deploy
+name: BGMI Bot 24/7 Cloud Runner
 
 on:
-  workflow_dispatch:
   push:
-    branches: [ main ]
+    branches: [ main, master ]
   schedule:
-    - cron: "0 */6 * * *"
-
-permissions:
-  contents: read
-
-concurrency:
-  group: deploy-single-instance
-  cancel-in-progress: true
+    - cron: '0 */5 * * *'
+  workflow_dispatch:
 
 jobs:
-  deploy:
+  run-bot:
     runs-on: ubuntu-latest
-    timeout-minutes: 360
-
     steps:
-      - name: Checkout
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
+      - name: Set up Python
         uses: actions/setup-python@v5
         with:
-          python-version: "3.12"
+          python-version: '3.11'
 
-      - name: Rebuild bot
-        env:
-          APP_CODE_1: ${{ secrets.APP_CODE_1 }}
-          APP_CODE_2: ${{ secrets.APP_CODE_2 }}
-          APP_CODE_3: ${{ secrets.APP_CODE_3 }}
-          APP_CODE_4: ${{ secrets.APP_CODE_4 }}
-          APP_CODE_5: ${{ secrets.APP_CODE_5 }}
-          APP_CODE_6: ${{ secrets.APP_CODE_6 }}
-        run: |
-          : > encoded.txt
-          printf '%s' "$APP_CODE_1" >> encoded.txt
-          printf '%s' "$APP_CODE_2" >> encoded.txt
-          printf '%s' "$APP_CODE_3" >> encoded.txt
-          printf '%s' "$APP_CODE_4" >> encoded.txt
-          printf '%s' "$APP_CODE_5" >> encoded.txt
-          printf '%s' "$APP_CODE_6" >> encoded.txt
-
-          base64 -d encoded.txt > discordbot.py
-
-          echo "Bot file rebuilt:"
-          wc -c discordbot.py
-
-      - name: Install dependencies
+      - name: Install Dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install discord.py requests Pillow
+          pip install python-telegram-bot httpx psutil
 
-      - name: Start bot
+      - name: Run Telegram Bot
         run: |
-          python discordbot.py
+          python telegram_bot.py
