@@ -234,9 +234,19 @@ class MatchServerUDPStresser:
                 except Exception:
                     pass
 
-        with self._lock:
-            self.packets_sent += local_pkts
-            self.bytes_sent += local_bytes
+            # Update live stats in real-time after each batch
+            if local_pkts > 0:
+                with self._lock:
+                    self.packets_sent += local_pkts
+                    self.bytes_sent += local_bytes
+                local_pkts = 0
+                local_bytes = 0
+
+        # Final flush if remaining
+        if local_pkts > 0:
+            with self._lock:
+                self.packets_sent += local_pkts
+                self.bytes_sent += local_bytes
 
     def start(self):
         self.is_running = True
